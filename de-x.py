@@ -89,9 +89,9 @@ def main(ac, av):
         success = delete_tweet(session, i, idx, total)
         if success:
             save_deleted_tweet(deleted_file, i)
-        # delay to stay within 50 requests per 15 minutes limit
+        # small delay between requests, will auto-wait on 429
         if idx < total:
-            time.sleep(20)
+            time.sleep(2)
 
 
 def delete_tweet(session, tweet_id, index, total):

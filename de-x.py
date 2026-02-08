@@ -37,19 +37,40 @@ def save_deleted_tweet(deleted_file, tweet_id):
 def parse_req_headers(request_file):
 
     sess = {}
-
+    
     with open(request_file) as f:
-        line = f.readline()
-        while line:
-            try:
-                k,v = line.split(':', 1)
-                val = v.lstrip().rstrip()
-                sess[k] = val
-            except:
-                # ignore empty lines
-                pass
-
-            line = f.readline()
+        content = f.read()
+    
+    # Try to parse as fetch format (JSON with headers object)
+    if '"headers"' in content or "'headers'" in content:
+        try:
+            # Extract the fetch call object
+            start = content.find('{')
+            end = content.rfind('}') + 1
+            if start >= 0 and end > start:
+                fetch_obj = json.loads(content[start:end])
+                if 'headers' in fetch_obj:
+                    for k, v in fetch_obj['headers'].items():
+                        # Normalize header names to Title-Case
+                        k = '-'.join(word.capitalize() for word in k.split('-'))
+                        sess[k] = v
+                    return sess
+        except:
+            pass
+    
+    # Fallback to simple key: value format
+    for line in content.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        try:
+            k, v = line.split(':', 1)
+            val = v.lstrip().rstrip()
+            # Normalize header names to Title-Case
+            k = '-'.join(word.capitalize() for word in k.strip().split('-'))
+            sess[k] = val
+        except:
+            pass
 
     return sess
 
@@ -97,11 +118,24 @@ def main(ac, av):
 def delete_tweet(session, tweet_id, index, total):
 
     print(f"[*] [{index}/{total}] delete tweet-id {tweet_id}")
-    delete_url = "https://twitter.com/i/api/graphql/VaenaVgh5q5ih7kvyVjgtg/DeleteTweet"
+    delete_url = "https://x.com/i/api/graphql/VaenaVgh5q5ih7kvyVjgtg/DeleteTweet"
     data = {"variables":{"tweet_id":tweet_id,"dark_request":False},"queryId":"VaenaVgh5q5ih7kvyVjgtg"}
 
     # set or re-set correct content-type header
-    session["content-type"] = 'application/json'
+    session["Content-Type"] = 'application/json'
+    
+    # Ensure critical headers are present
+    if "User-Agent" not in session:
+        session["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+    if "Origin" not in session:
+        session["Origin"] = "https://x.com"
+    if "Referer" not in session:
+        session["Referer"] = "https://x.com/home"
+    
+    print(f"[*] API endpoint: {delete_url}")
+    print(f"[*] Request data: {json.dumps(data)}")
+    print(f"[*] Has Cookie header: {'Cookie' in session}")
+    print(f"[*] Headers sent: {list(session.keys())}")
     
     max_retries = 5
     retry_delay = 5
@@ -109,7 +143,8 @@ def delete_tweet(session, tweet_id, index, total):
     for attempt in range(max_retries):
         try:
             r = requests.post(delete_url, data=json.dumps(data), headers=session, timeout=30)
-            print(r.status_code, r.reason)
+            print(f"[*] Response status: {r.status_code} {r.reason}")
+            print(f"[*] Response headers: {dict(r.headers)}")
             
             rate_limit = r.headers.get('x-rate-limit-limit')
             rate_remaining = r.headers.get('x-rate-limit-remaining')
@@ -144,7 +179,9 @@ def delete_tweet(session, tweet_id, index, total):
                     time.sleep(5)
                 return True
             else:
-                print(f"[!] Unexpected status code. Marking as failed.")
+                print(f"[!] Unexpected status code {r.status_code}. Response body: {r.text[:1000]}")
+                if r.status_code == 403:
+                    print(f"[!] 403 Forbidden - Check if headers (especially authorization tokens) are still valid")
                 return False
                 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:

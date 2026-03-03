@@ -12,6 +12,7 @@ import json
 import requests
 import time
 import os
+import re
 
 def get_tweet_ids(json_data):
 
@@ -74,10 +75,48 @@ def parse_req_headers(request_file):
 
     return sess
 
+def parse_fetch_call(fetch_file):
+    if not os.path.exists(fetch_file):
+        return None
+
+    with open(fetch_file, 'r') as f:
+        content = f.read()
+
+    url_match = re.search(r'fetch\(\s*"([^"]+)"\s*,', content, re.DOTALL)
+    if not url_match:
+        return None
+
+    try:
+        obj_start = content.find('{', url_match.end())
+        obj_end = content.rfind('}')
+        if obj_start < 0 or obj_end <= obj_start:
+            return None
+
+        fetch_obj = json.loads(content[obj_start:obj_end + 1])
+    except Exception:
+        return None
+
+    body = fetch_obj.get("body")
+    body_json = None
+    if isinstance(body, str) and body.strip():
+        try:
+            body_json = json.loads(body)
+        except Exception:
+            body_json = None
+    elif isinstance(body, dict):
+        body_json = body
+
+    return {
+        "url": url_match.group(1),
+        "method": fetch_obj.get("method", "POST"),
+        "headers": fetch_obj.get("headers", {}),
+        "body_json": body_json
+    }
+
 def main(ac, av):
 
-    if(ac != 3):
-        print(f"[!] usage: {av[0]} <jsonfile> <req-headers>")
+    if(ac < 3 or ac > 4):
+        print(f"[!] usage: {av[0]} <jsonfile> <req-headers> [model-api-call.txt]")
         return
 
     f = open(av[1], encoding='UTF-8')
@@ -89,6 +128,13 @@ def main(ac, av):
     ids = get_tweet_ids(raw[i:])
 
     session = parse_req_headers(av[2])
+
+    model_api_file = av[3] if ac == 4 else 'model-api-call.txt'
+    model_api_call = parse_fetch_call(model_api_file)
+    if model_api_call:
+        print(f"[+] Loaded API call template from {model_api_file}")
+    else:
+        print(f"[i] No valid API call template in {model_api_file}. Using built-in fallback.")
 
     deleted_file = 'deleted_tweets.txt'
     deleted_tweets = load_deleted_tweets(deleted_file)
@@ -107,7 +153,7 @@ def main(ac, av):
     print(f"[+] {total} tweets remaining to delete\n")
     
     for idx, i in enumerate(ids_to_delete, 1):
-        success = delete_tweet(session, i, idx, total)
+        success = delete_tweet(session, i, idx, total, model_api_call)
         if success:
             save_deleted_tweet(deleted_file, i)
         # small delay between requests, will auto-wait on 429
@@ -115,22 +161,31 @@ def main(ac, av):
             time.sleep(2)
 
 
-def delete_tweet(session, tweet_id, index, total):
+def delete_tweet(session, tweet_id, index, total, model_api_call=None):
 
     print(f"[*] [{index}/{total}] delete tweet-id {tweet_id}")
-    delete_url = "https://x.com/i/api/graphql/VaenaVgh5q5ih7kvyVjgtg/DeleteTweet"
-    data = {"variables":{"tweet_id":tweet_id,"dark_request":False},"queryId":"VaenaVgh5q5ih7kvyVjgtg"}
+    if model_api_call and model_api_call.get("url"):
+        delete_url = model_api_call["url"]
+        data = model_api_call.get("body_json") or {"variables": {}, "queryId": ""}
+    else:
+        delete_url = "https://x.com/i/api/graphql/nxpZCY2K-I6QoFHAHeojFQ/DeleteTweet"
+        data = {"variables": {"tweet_id": tweet_id}, "queryId": "nxpZCY2K-I6QoFHAHeojFQ"}
+
+    if "variables" not in data or not isinstance(data["variables"], dict):
+        data["variables"] = {}
+    data["variables"]["tweet_id"] = tweet_id
+
 
     # set or re-set correct content-type header
     session["Content-Type"] = 'application/json'
     
-    # Ensure critical headers are present
+    # Ensure critical headers are present (but don't override Referer from template)
     if "User-Agent" not in session:
         session["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
     if "Origin" not in session:
         session["Origin"] = "https://x.com"
-    if "Referer" not in session:
-        session["Referer"] = "https://x.com/home"
+    if "X-Twitter-Active-User" not in session:
+        session["X-Twitter-Active-User"] = "yes"
     
     print(f"[*] API endpoint: {delete_url}")
     print(f"[*] Request data: {json.dumps(data)}")
@@ -142,7 +197,7 @@ def delete_tweet(session, tweet_id, index, total):
     
     for attempt in range(max_retries):
         try:
-            r = requests.post(delete_url, data=json.dumps(data), headers=session, timeout=30)
+            r = requests.post(delete_url, json=data, headers=session, timeout=30)
             print(f"[*] Response status: {r.status_code} {r.reason}")
             print(f"[*] Response headers: {dict(r.headers)}")
             
